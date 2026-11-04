@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "author": "FrioSeguro",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht1",
+      "top": -134.1,
+      "left": -149.4,
+      "attrs": { "temperature": "3", "humidity": "80" }
+    },
+    {
+      "type": "wokwi-hc-sr04",
+      "id": "porta",
+      "top": -142.5,
+      "left": 120.7,
+      "attrs": { "distance": "5" }
+    },
+    { "type": "wokwi-relay-module", "id": "compressor", "top": 211.4, "left": 172.8, "attrs": {} },
+    {
+      "type": "wokwi-buzzer",
+      "id": "sirene",
+      "top": 194.4,
+      "left": -142.2,
+      "attrs": { "volume": "0.2" }
+    },
+    {
+      "type": "wokwi-rgb-led",
+      "id": "sinaleiro",
+      "top": 61.6,
+      "left": -229.3,
+      "attrs": { "common": "cathode" }
+    },
+    { "type": "wokwi-resistor", "id": "rR", "top": 128.8, "left": -144, "attrs": { "value": "220" } },
+    { "type": "wokwi-resistor", "id": "rG", "top": 148, "left": -144, "attrs": { "value": "220" } },
+    { "type": "wokwi-resistor", "id": "rB", "top": 167.2, "left": -144, "attrs": { "value": "220" } },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "silenciar",
+      "top": 275,
+      "left": 19.2,
+      "attrs": { "color": "yellow", "label": "Silenciar" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+
+    [ "dht1:VCC", "esp:3V3", "red", [] ],
+    [ "dht1:GND", "esp:GND.1", "black", [] ],
+    [ "dht1:SDA", "esp:15", "green", [] ],
+
+    [ "porta:VCC", "esp:5V", "red", [] ],
+    [ "porta:GND", "esp:GND.2", "black", [] ],
+    [ "porta:TRIG", "esp:5", "orange", [] ],
+    [ "porta:ECHO", "esp:18", "purple", [] ],
+
+    [ "compressor:VCC", "esp:5V", "red", [] ],
+    [ "compressor:GND", "esp:GND.2", "black", [] ],
+    [ "compressor:IN", "esp:26", "blue", [] ],
+
+    [ "sirene:1", "esp:GND.1", "black", [] ],
+    [ "sirene:2", "esp:25", "magenta", [] ],
+
+    [ "sinaleiro:COM", "esp:GND.1", "black", [] ],
+    [ "sinaleiro:R", "rR:1", "red", [] ],
+    [ "rR:2", "esp:27", "red", [] ],
+    [ "sinaleiro:G", "rG:1", "green", [] ],
+    [ "rG:2", "esp:14", "green", [] ],
+    [ "sinaleiro:B", "rB:1", "blue", [] ],
+    [ "rB:2", "esp:13", "blue", [] ],
+
+    [ "silenciar:1.l", "esp:4", "yellow", [] ],
+    [ "silenciar:2.l", "esp:GND.2", "black", [] ]
+  ],
+  "dependencies": {}
+}

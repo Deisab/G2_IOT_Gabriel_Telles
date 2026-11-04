@@ -1,0 +1,6 @@
+# Segredos (credenciais Wi-Fi, MQTT, token do Worker, chave HMAC)
+firmware/secrets.h
+worker/.dev.vars
+.wrangler/
+node_modules/
+.DS_Store

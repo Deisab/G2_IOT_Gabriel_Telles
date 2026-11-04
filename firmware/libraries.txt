@@ -1,0 +1,4 @@
+# Bibliotecas do Wokwi (uma por linha)
+DHT sensor library for ESPx
+PubSubClient
+ArduinoJson
