@@ -3,12 +3,14 @@
 //
 // Duas tarefas:
 //   tarefaControle (núcleo 1, prioridade alta): sensores, regra com histerese, atuadores.
-//   loop() (rede): Wi-Fi, MQTT/TLS, histórico no Worker, comandos assinados.
+//   loop() (rede): Wi-Fi, MQTT/TLS, histórico e comandos assinados.
+// O ESP32 só fala MQTT. O histórico vai assinado (HMAC) para o tópico .../historico e uma
+// regra do EMQX repassa ao Worker (HTTPS) -> D1. No Wokwi, um HTTPS direto para a
+// Cloudflare estoura o tempo do aperto de mão TLS (verificação ECDSA lenta no simulador).
 // Se a rede travar, o controle continua rodando.
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <DHTesp.h>
@@ -27,6 +29,7 @@
 #define T_COMANDO    TOPIC_BASE "/comando"
 #define T_ACK        TOPIC_BASE "/ack"
 #define T_ALERTA     TOPIC_BASE "/alerta"
+#define T_HISTORICO  TOPIC_BASE "/historico"
 
 // ---------------------------------------------------------------- pinos
 #define PIN_DHT     15
@@ -58,11 +61,15 @@
 #define LEITURA_MS           2000UL    // DHT22 precisa de >= 2 s entre leituras
 #define HISTORICO_MS        60000UL    // 1 leitura por minuto no D1
 #define TELEMETRIA_MS       10000UL
-#define ENVIO_MS            15000UL    // tenta esvaziar o buffer a cada 15 s
+#define ENVIO_MS            60000UL    // publica o histórico a cada 60 s (1 leitura/min)
+#define LOTE_LEITURAS          15      // por mensagem; o resto do buffer sai em seguida
+#define LOTE_EVENTOS           10
 #define SILENCIO_MS        600000UL    // botão/comando silencia o buzzer por 10 min
 #define FALHAS_P_ESTADO_SEGURO 3
 #define PORTA_FECHADA_CM     10.0f
 #define CMD_VALIDADE_MAX_S   60        // exp no máximo 60 s no futuro
+#define TOLERANCIA_RELOGIO_S 120       // diferença aceita entre o relógio do Worker e o do ESP32
+#define NTP_RESYNC_MS     300000UL     // acerta a hora a cada 5 min (no Wokwi o relógio atrasa)
 
 // ---------------------------------------------------------------- configuração (NVS)
 struct Config {
@@ -100,7 +107,7 @@ Evento  bufE[BUF_EVENTOS];  uint32_t seqE = 0, enviadoE = 0, publicadoE = 0;
 
 Preferences prefs;
 DHTesp dht;
-WiFiClientSecure netMqtt, netHttp;
+WiFiClientSecure netMqtt;
 PubSubClient mqtt(netMqtt);
 
 #define LOCK()   xSemaphoreTake(mtx, portMAX_DELAY)
@@ -209,14 +216,28 @@ void tarefaControle(void*) {
       }
 
       // alarme de temperatura: acima de alarme_c por alarme_s; normaliza abaixo de normal_c
-      if (est.sensor_ok && est.temp_c > c.alarme_c) { if (!quenteDesde) quenteDesde = agora; }
-      else quenteDesde = 0;
+      if (est.sensor_ok && est.temp_c > c.alarme_c) {
+        if (!quenteDesde && !est.alarme_temp) {
+          quenteDesde = agora;
+          Serial.printf("[regra] T=%.1fC acima de %.1fC: alarme em %lus se continuar acima\n",
+                        est.temp_c, c.alarme_c, (unsigned long)c.alarme_s);
+        }
+      } else {
+        if (quenteDesde && !est.alarme_temp)
+          Serial.printf("[regra] T=%.1fC voltou a <= %.1fC antes de %lus: contagem zerada\n",
+                        est.temp_c, c.alarme_c, (unsigned long)c.alarme_s);
+        quenteDesde = 0;
+      }
       if (quenteDesde && agora - quenteDesde >= c.alarme_s * 1000UL) est.alarme_temp = true;
       if (est.sensor_ok && est.temp_c < c.normal_c) est.alarme_temp = false;
 
       // alarme de porta: aberta por porta_s; normaliza ao fechar
-      if (est.porta_aberta) { if (!portaDesde) portaDesde = agora; }
-      else portaDesde = 0;
+      if (est.porta_aberta) {
+        if (!portaDesde) {
+          portaDesde = agora;
+          Serial.printf("[regra] porta aberta: alarme em %lus se continuar aberta\n", (unsigned long)c.porta_s);
+        }
+      } else portaDesde = 0;
       est.alarme_porta = portaDesde && agora - portaDesde >= c.porta_s * 1000UL;
 
       est.falha_sensor = !est.sensor_ok;
@@ -374,7 +395,7 @@ void processarAlertas() {
 
 // ================================================================ MQTT: comandos assinados
 // Formato: {"p":"<JSON do comando como texto>","sig":"<HMAC-SHA256(p) em hex>"}
-// p = {"id":"c-...","cmd":"silenciar"|"config","exp":<unix>,"args":{...}}
+// p = {"id":"c-...","cmd":"silenciar"|"cancelar_silencio"|"config","exp":<unix>,"args":{...}}
 #define IDS_RECENTES 16
 String idsRecentes[IDS_RECENTES]; uint8_t idxIds = 0;
 
@@ -411,7 +432,13 @@ void aoReceber(char* topico, byte* payload, unsigned int len) {
   if (!id || strlen(id) < 8 || strlen(id) > 40)          { rejeitar(id, "id_invalido"); return; }
   if (!horaValida())                                      { rejeitar(id, "sem_hora"); return; }
   uint32_t exp = cmd["exp"] | 0, agora = agoraUnix();
-  if (exp < agora || exp > agora + CMD_VALIDADE_MAX_S)    { rejeitar(id, "expirado"); return; }
+  // exp vem do relógio do Worker; tolera atraso/adiantamento do relógio do ESP32.
+  // Replay dentro da tolerância continua bloqueado pela lista de ids recentes.
+  int32_t dif = (int32_t)(exp - agora);
+  if (dif < -TOLERANCIA_RELOGIO_S || dif > CMD_VALIDADE_MAX_S + TOLERANCIA_RELOGIO_S) {
+    Serial.printf("[comando] exp - agora = %ld s (fora da janela)\n", (long)dif);
+    rejeitar(id, "expirado"); return;
+  }
   for (auto& r : idsRecentes) if (r == id)                { rejeitar(id, "repetido"); return; }
   idsRecentes[idxIds] = id; idxIds = (idxIds + 1) % IDS_RECENTES;
 
@@ -421,6 +448,14 @@ void aoReceber(char* topico, byte* payload, unsigned int len) {
     if (alarmeAtivo(est)) est.silenciado_ate = millis() + SILENCIO_MS;
     est.versao++;
     registrarEvento("silenciado_remoto", true, est.temp_c);
+    UNLOCK();
+    responderAck(id, true, nullptr);
+  } else if (!strcmp(nome, "cancelar_silencio")) {
+    // desfaz um "silenciar" (do painel ou do botão): a sirene volta na hora se o alarme estiver ativo
+    LOCK();
+    est.silenciado_ate = 0;
+    est.versao++;
+    registrarEvento("silencio_cancelado", true, est.temp_c);
     UNLOCK();
     responderAck(id, true, nullptr);
   } else if (!strcmp(nome, "config")) {
@@ -433,20 +468,23 @@ void aoReceber(char* topico, byte* payload, unsigned int len) {
   Serial.printf("[comando] executado: %s (%s)\n", nome, id);
 }
 
-// ================================================================ HTTPS: Worker
-bool postarHistorico() {
-  // monta um lote com até 30 leituras e todos os eventos ainda não enviados
+// ================================================================ histórico (MQTT -> EMQX -> Worker)
+// Mensagem: {"p":"<JSON do lote como texto>","sig":"<HMAC-SHA256(p)>"}
+// O Worker confere a assinatura antes de gravar: quem só tem a senha do broker não injeta dados.
+// Devolve true se ainda sobrou coisa no buffer (para publicar o próximo lote logo em seguida).
+bool publicarHistorico() {
   JsonDocument d;
   d["disp"] = DISP_ID;
   JsonArray L = d["leituras"].to<JsonArray>();
   JsonArray E = d["eventos"].to<JsonArray>();
   uint32_t ateL, ateE;
+  bool sobrou;
 
   LOCK();
   if (seqL - enviadoL > BUF_LEITURAS) enviadoL = seqL - BUF_LEITURAS;  // buffer deu a volta
   if (seqE - enviadoE > BUF_EVENTOS)  enviadoE = seqE - BUF_EVENTOS;
-  ateL = min(seqL, enviadoL + 30);
-  ateE = seqE;
+  ateL = min(seqL, enviadoL + LOTE_LEITURAS);
+  ateE = min(seqE, enviadoE + LOTE_EVENTOS);
   for (uint32_t s = enviadoL; s < ateL; s++) {
     const Leitura& l = bufL[s % BUF_LEITURAS];
     JsonObject o = L.add<JsonObject>();
@@ -461,42 +499,24 @@ bool postarHistorico() {
     o["ts"] = msParaUnix(e.ms); o["tipo"] = e.tipo; o["ativo"] = e.ativo ? 1 : 0;
     setFloatOuNull(o["temp_c"], e.t);
   }
+  sobrou = ateL < seqL || ateE < seqE;
   UNLOCK();
 
-  if (L.size() == 0 && E.size() == 0) return true;
+  if (L.size() == 0 && E.size() == 0) return false;
 
-  String corpo; serializeJson(d, corpo);
-  HTTPClient http;
-  http.setTimeout(8000);
-  if (!http.begin(netHttp, WORKER_URL "/api/leituras")) return false;
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", "Bearer " DEVICE_TOKEN);
-  int code = http.POST(corpo);
-  http.end();
+  String p; serializeJson(d, p);
+  JsonDocument ext;
+  ext["p"] = p;
+  ext["sig"] = hmacHex(p.c_str(), p.length());
+  String msg; serializeJson(ext, msg);
 
-  if (code >= 200 && code < 300) {
-    LOCK(); enviadoL = max(enviadoL, ateL); enviadoE = max(enviadoE, ateE); UNLOCK();
-    Serial.printf("[historico] enviado: %u leituras, %u eventos\n", (unsigned)L.size(), (unsigned)E.size());
-    return true;
+  if (!mqtt.publish(T_HISTORICO, msg.c_str())) {
+    Serial.printf("[historico] falhou ao publicar (%u bytes), fica no buffer\n", (unsigned)msg.length());
+    return false;
   }
-  Serial.printf("[historico] falhou (HTTP %d), fica no buffer\n", code);
-  return false;
-}
-
-bool buscarConfigRemota() {
-  HTTPClient http;
-  http.setTimeout(8000);
-  if (!http.begin(netHttp, WORKER_URL "/api/config?disp=" DISP_ID)) return false;
-  http.addHeader("Authorization", "Bearer " DEVICE_TOKEN);
-  int code = http.GET();
-  bool ok = false;
-  if (code == 200) {
-    JsonDocument d;
-    if (!deserializeJson(d, http.getString())) ok = aplicarConfig(d.as<JsonObjectConst>());
-  }
-  http.end();
-  Serial.printf("[config] remota %s (HTTP %d)\n", ok ? "aplicada" : "mantida da NVS", code);
-  return code == 200 || code == 404;   // 404 = ainda não há config no KV
+  LOCK(); enviadoL = max(enviadoL, ateL); enviadoE = max(enviadoE, ateE); UNLOCK();
+  Serial.printf("[historico] publicado: %u leituras, %u eventos\n", (unsigned)L.size(), (unsigned)E.size());
+  return sobrou;
 }
 
 // ================================================================ conexões
@@ -539,26 +559,42 @@ void setup() {
   xTaskCreatePinnedToCore(tarefaControle, "controle", 6144, nullptr, 3, nullptr, 1);
 
   netMqtt.setCACert(ROOT_CA_BUNDLE);   // confere o certificado do broker (sem setInsecure)
-  netHttp.setCACert(ROOT_CA_BUNDLE);   // confere o certificado do Worker
   netMqtt.setHandshakeTimeout(15);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
-  mqtt.setBufferSize(1024);
+  mqtt.setBufferSize(4096);   // lote de histórico assinado cabe aqui
   mqtt.setKeepAlive(30);
   mqtt.setCallback(aoReceber);
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setAutoReconnect(true);
+  // canal 6 = canal do Wokwi-GUEST; conecta mais rápido (numa placa real, tirar o 6)
+  WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
+  Serial.println("[wifi] conectando em " WIFI_SSID "...");
 }
 
 void loop() {
-  static bool ntpIniciado = false, configBuscada = false, wifiAnt = false;
+  static bool ntpIniciado = false, wifiAnt = false;
   static uint32_t ultTelemetria = 0, ultEnvio = 0, ultLog = 0, versaoPublicada = 0;
 
   bool wifi = WiFi.status() == WL_CONNECTED;
   if (wifi != wifiAnt) { wifiAnt = wifi; Serial.println(wifi ? "[wifi] conectado" : "[wifi] sem conexão — controle segue local"); }
 
+  // se o Wi-Fi não subiu (ou caiu e não voltou sozinho), tenta de novo a cada 15 s
+  static uint32_t ultTentativaWifi = millis();
+  if (!wifi && millis() - ultTentativaWifi >= 15000) {
+    ultTentativaWifi = millis();
+    Serial.printf("[wifi] ainda sem conexão (status %d), tentando de novo\n", WiFi.status());
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
+  }
+
   if (wifi) {
-    if (!ntpIniciado) { configTime(0, 0, "pool.ntp.org", "time.google.com"); ntpIniciado = true; }
+    // configTime de novo força uma nova sincronização NTP
+    static uint32_t ultNtp = 0;
+    if (!ntpIniciado || millis() - ultNtp >= NTP_RESYNC_MS) {
+      configTime(0, 0, "pool.ntp.org", "time.google.com");
+      ntpIniciado = true; ultNtp = millis();
+    }
 
     conectarMqtt();
     mqtt.loop();
@@ -568,11 +604,12 @@ void loop() {
       if (v != versaoPublicada) { versaoPublicada = v; publicarEstado(); }
       if (millis() - ultTelemetria >= TELEMETRIA_MS) { ultTelemetria = millis(); publicarTelemetria(); }
       processarAlertas();
-    }
 
-    if (horaValida()) {
-      if (!configBuscada) configBuscada = buscarConfigRemota();
-      if (millis() - ultEnvio >= ENVIO_MS) { ultEnvio = millis(); postarHistorico(); }
+      // histórico precisa da hora certa (NTP) para os timestamps
+      if (horaValida() && millis() - ultEnvio >= ENVIO_MS) {
+        ultEnvio = millis();
+        if (publicarHistorico()) ultEnvio -= ENVIO_MS - 2000;   // buffer cheio (voltou da queda): próximo lote em 2 s
+      }
     }
   }
 

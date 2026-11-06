@@ -1,0 +1,24 @@
+name = "frioseguro"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Painel (HTML/JS) servido como arquivo estático; /api/* cai no Worker
+[assets]
+directory = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "frioseguro"
+database_id = "4c61b722-d289-4253-9de3-7f8b80d347ae"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "dae48e2cb8cb4111afc7a616d6aa4c63"
+
+# Retenção: apaga leituras > 90 dias e eventos > 1 ano (todo dia, 03:00 de Brasília)
+[triggers]
+crons = ["0 6 * * *"]
+
+# Segredos (não ficam aqui): DEVICE_TOKEN, HMAC_KEY, PAINEL_PIN
+#   npx wrangler secret put DEVICE_TOKEN
+# Em desenvolvimento local eles vêm de .dev.vars (no .gitignore).

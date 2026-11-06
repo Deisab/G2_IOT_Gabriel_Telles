@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrioSeguro — Painel</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- Login: PIN do gerente (rotas do Worker) + senha do usuário MQTT "painel" -->
+  <section id="login" class="login">
+    <form id="form-login" class="cartao">
+      <h1>FrioSeguro</h1>
+      <p class="sutil">Câmara fria · camara01</p>
+      <label>PIN do gerente <input id="in-pin" type="password" autocomplete="current-password" required></label>
+      <label>Senha MQTT do painel <input id="in-mqtt" type="password" autocomplete="off" required></label>
+      <button type="submit">Entrar</button>
+      <p id="login-erro" class="erro" role="alert"></p>
+    </form>
+  </section>
+
+  <main id="app" hidden>
+    <header class="topo">
+      <div>
+        <h1>FrioSeguro <span class="sutil">· camara01</span></h1>
+        <p class="sutil" id="ultima">Aguardando dados…</p>
+      </div>
+      <div class="selos">
+        <span id="selo-mqtt" class="selo">MQTT: conectando</span>
+        <span id="selo-disp" class="selo">Dispositivo: ?</span>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden role="alert"></div>
+
+    <section class="grade">
+      <div class="cartao kpi"><span class="rotulo">Temperatura</span><span id="k-temp" class="valor">—</span></div>
+      <div class="cartao kpi"><span class="rotulo">Umidade</span><span id="k-umid" class="valor">—</span></div>
+      <div class="cartao kpi"><span class="rotulo">Porta</span><span id="k-porta" class="valor">—</span></div>
+      <div class="cartao kpi"><span class="rotulo">Compressor</span><span id="k-comp" class="valor">—</span></div>
+      <div class="cartao kpi"><span class="rotulo">Alarme</span><span id="k-alarme" class="valor">—</span></div>
+    </section>
+
+    <section class="duas">
+      <div class="cartao">
+        <h2>Comandos</h2>
+        <div class="botoes">
+          <button id="bt-silenciar">Silenciar alarme (10 min)</button>
+          <button id="bt-reativar" class="secundario" disabled>Cancelar silêncio</button>
+        </div>
+        <form id="form-config" class="config">
+          <label>Liga compressor acima de (°C) <input name="liga_c" type="number" step="0.1"></label>
+          <label>Desliga compressor abaixo de (°C) <input name="desliga_c" type="number" step="0.1"></label>
+          <label>Alarme acima de (°C) <input name="alarme_c" type="number" step="0.1"></label>
+          <label>Normaliza abaixo de (°C) <input name="normal_c" type="number" step="0.1"></label>
+          <label>Tempo quente até alarmar (s) <input name="alarme_s" type="number" step="1"></label>
+          <label>Porta aberta até alarmar (s) <input name="porta_s" type="number" step="1"></label>
+          <button type="submit">Enviar limites</button>
+        </form>
+        <p id="cmd-status" class="cmd-status" aria-live="polite">Nenhum comando enviado.</p>
+      </div>
+      <div class="cartao">
+        <h2>Alertas e eventos</h2>
+        <ul id="eventos" class="eventos"></ul>
+      </div>
+    </section>
+
+    <section class="cartao">
+      <h2>Temperatura — últimas 24 h</h2>
+      <div class="grafico"><canvas id="grafico"></canvas></div>
+    </section>
+
+    <section class="cartao">
+      <h2>Resumo por hora (24 h)</h2>
+      <div class="tabela-rolagem">
+        <table>
+          <thead><tr><th>Hora</th><th>Mín</th><th>Média</th><th>Máx</th><th>Min. acima do limite</th></tr></thead>
+          <tbody id="resumo"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
