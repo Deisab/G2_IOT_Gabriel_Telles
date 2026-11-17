@@ -202,7 +202,8 @@ $("form-config").addEventListener("submit", (ev) => {
 
 function preencherConfig(c) {
   const form = $("form-config");
-  if (form.contains(document.activeElement)) return;   // não sobrescreve o que o usuário está digitando
+  // não sobrescreve o que o usuário está digitando (só campo de texto; o botão clicado não conta)
+  if (form.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;
   for (const k of Object.keys(c)) if (form.elements[k]) form.elements[k].value = c[k];
 }
 

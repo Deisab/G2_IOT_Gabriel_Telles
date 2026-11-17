@@ -3,9 +3,9 @@
 > Rascunho em Markdown para revisar. A versão final vai para `docs/` em .docx ou PDF.
 > Itens marcados com **[PREENCHER]** dependem de você ou dos testes.
 
-- **Integrante:** [PREENCHER] (trabalho solo: montagem, código, nuvem e painel, caderno e testes)
+- **Integrante:** Gabriel Telles (trabalho solo: montagem, código, nuvem e painel, caderno e testes)
 - **Desafio escolhido:** Opção B — FrioSeguro, monitor de câmara fria de restaurante
-- **Repositório:** [PREENCHER link do GitHub]
+- **Repositório:** https://github.com/Deisab/G2_IOT_Gabriel_Telles
 - **Plataforma:** simulação no Wokwi (ESP32)
 
 ---
@@ -145,6 +145,10 @@ O comando vai como texto dentro de `p`, e a assinatura é calculada sobre esse t
 **TLS: qual porta e como o ESP32 confere o servidor?**
 Porta **8883**. O ESP32 usa `WiFiClientSecure` com `setCACert()` e os certificados raiz da autoridade que assina o broker (ISRG Root X1 e X2, do Let's Encrypt). A cadeia foi conferida com `openssl s_client` em 05/11/2026. Assim ele confere se está falando com o broker verdadeiro. **Não** é usado `setInsecure()`. O trecho EMQX → Worker também é HTTPS, verificado pelo próprio EMQX.
 
+
+**Evidência:** regra de Data Integration no EMQX — conector HTTP *Connected*, regra no tópico `.../historico` e ação "repassa histórico ao Worker" ativas.
+
+![Regra do EMQX que repassa o histórico ao Worker](img/emqx_regra_historico.png)
 ---
 
 ## Etapa 5 — Guardar: o histórico
@@ -241,6 +245,12 @@ Cada comando tem um `id` único. O painel mostra **"enviado — aguardando confi
 **Polling ou WebSocket? Por quê?**
 **WebSocket** (MQTT sobre WSS) para o estado ao vivo: o painel muda sozinho em menos de 2 s, sem recarregar e sem ficar perguntando ao servidor a cada segundo. O **histórico, o resumo e a lista de eventos** vêm do D1 por HTTPS quando a página abre, a cada 60 s (o mesmo ritmo em que o ESP32 manda o lote) e ~65 s depois de cada alerta ou ack, para que eventos como "silenciado" apareçam sem recarregar a página.
 
+
+**Evidências:** gráfico de 24 h com a linha do limite e o resumo por hora (a consulta da Etapa 5: na hora das 19:00, máxima de 6,0 °C e 1 minuto acima do limite); painel com o dispositivo **OFFLINE** avisando que comandos não serão executados, e um comando que **não foi confirmado em 10 s**.
+
+![Painel: gráfico e resumo por hora](img/painel_grafico_resumo.png)
+
+![Painel com o dispositivo offline e comando sem confirmação](img/painel_offline.png)
 ---
 
 ## Etapa 7 — Proteger: segurança
@@ -253,13 +263,19 @@ Cada comando tem um `id` único. O painel mostra **"enviado — aguardando confi
 | 4. Tópico de comando aberto | Sim, `.../comando`. | **Dispositivo + nuvem:** o broker exige credencial, e todo comando leva uma assinatura HMAC-SHA256, um `exp` (validade de 30 s) e um `id` único. O ESP32 rejeita (e responde ack com `ok:false`) comandos sem assinatura válida, expirados ou com `id` repetido. Mesmo quem tiver a senha do broker não consegue forjar um comando. A validade é comparada com o relógio do ESP32, que acerta a hora por NTP a cada 5 min e aceita até 2 min de diferença em relação ao Worker: no Wokwi a simulação às vezes roda mais devagar que o tempo real, e sem essa folga comandos legítimos eram recusados como `expirado`. Uma repetição dentro dessa folga continua bloqueada pela lista de `id`s recentes. |
 | 5. Segredo no GitHub ou no Serial | Risco: senha do MQTT, token do repasse e chave HMAC. | **Código:** segredos ficam em `firmware/secrets.h` e `worker/.dev.vars`, ambos no `.gitignore`. O repositório traz só `secrets.example.h`, o Worker usa `wrangler secret`, o token do repasse fica guardado no conector do EMQX, e o Serial nunca imprime credenciais nem tokens. |
 
+
+**Evidência do buraco 1:** no EMQX só as portas com TLS (8883 e 8084) estão ligadas.
+
+![Portas do EMQX: só TLS](img/emqx_portas_so_tls.png)
 ---
 
 ## Etapa 8 — Extra
 
 **Extra escolhido e por que combina com o problema:** **Tempo real**, com o painel atualizado por WebSocket (MQTT sobre WSS). Numa câmara fria, a equipe precisa ver o alarme na hora, sem recarregar a página. O extra de energia (deep sleep) não combina, porque a câmara fica ligada na tomada e o controle do compressor exige o ESP32 sempre acordado.
 
-**Evidência:** [PREENCHER] vídeo curto mostrando o slider de temperatura do Wokwi sendo mexido e o painel mudando sozinho, com o tempo medido entre a mudança e a atualização.
+**Evidência:** vídeo de 17/11/2026 (anexado no Classroom, porque passa do limite de 100 MB do GitHub) mostrando o slider do DHT22 sendo mexido no Wokwi e o painel mudando sozinho, sem recarregar a página. Os prints abaixo também mostram o painel atualizado ao vivo, lado a lado com o Wokwi, nos testes de queda de rede e de falha do sensor. Tempo de resposta medido nos comandos: confirmação (ack) em **~0,5 s** (501 ms no painel).
+
+![Painel e Wokwi lado a lado: alarme de falha do sensor ao vivo](img/falha_sensor_historico.png)
 
 ---
 
@@ -272,7 +288,13 @@ Cada comando tem um `id` único. O painel mostra **"enviado — aguardando confi
 | Nuvem | EMQX Cloud (broker); regra de Data Integration que repassa `.../historico` ao Worker; Cloudflare Worker com as rotas `/api/leituras` (gravação com token + HMAC), `/api/historico`, `/api/resumo`, `/api/eventos` e `/api/assinar`; D1 (`leituras`, `eventos`); KV (`config`, contador de PIN errado); cron diário de retenção. As rotas do painel exigem o PIN do gerente, com bloqueio depois de 5 erros. |
 | Interface | Painel web servido pelo Worker com estado ao vivo, gráfico de 24 h, tabela de resumo, alertas, botão de silenciar e formulário de limites com confirmação por ack. |
 
-**Desenho ou print do sistema:** [PREENCHER] print do diagrama no Wokwi e diagrama de arquitetura.
+**Desenho ou print do sistema:**
+
+![Diagrama de arquitetura](img/arquitetura.png)
+
+![Montagem no Wokwi com o alarme ativo](img/wokwi_simulacao_alarme.png)
+
+Versão em texto do diagrama:
 
 ```
 [DHT22]  [HC-SR04]  [Botão]
@@ -294,12 +316,20 @@ Cada comando tem um `id` único. O painel mostra **"enviado — aguardando confi
 
 | Teste | Como fizemos | Resultado |
 |---|---|---|
-| Isolado: cada peça sozinha | Sketch de teste: ler o DHT22 e o HC-SR04 no Serial, ligar o relé, o buzzer e cada cor do LED; testar o Worker com `curl`; ver as mensagens do broker no cliente MQTTX. | [PREENCHER] |
-| No limite: forçar o sensor | Slider do DHT22 em 4,1 / 1,9 / 5,1 °C e −10 / 60 °C; ultrassônico em 9 e 11 cm. | [PREENCHER] |
-| Na falha: tirar o sensor ou o Wi-Fi | Desconectar o fio de dados do DHT22 no diagrama (estado seguro); trocar o SSID para um inexistente e ver se o controle continua, o buffer enche e o envio acontece quando volta. | [PREENCHER] |
-| No reinício: tirar e ligar o USB | Reiniciar a simulação e conferir se os limites voltam da NVS, se o estado seguro vale até a primeira leitura e se o painel mostra offline → online. | [PREENCHER] |
-| No ataque: comando falso | Publicar um `silenciar` sem assinatura, com assinatura errada, expirado e repetido (replay) pelo cliente MQTTX; chamar `/api/leituras` sem token, e com token mas com o lote sem assinatura ou com assinatura errada. | [PREENCHER] |
-| Na duração: 10 min ligado | Deixar a simulação rodando 10 min: contar as leituras no D1 (~10), conferir que não há reconexões nem travamentos e acompanhar a memória livre no Serial. | [PREENCHER] |
+| Isolado: cada peça sozinha | Cada parte foi validada separadamente durante o desenvolvimento: sensores e atuadores pelo Serial e pelos componentes do Wokwi (slider do DHT22, distância do HC-SR04, relé, LED, sirene); o Worker com `curl` em cada rota; o broker com o cliente MQTTX; o conector do EMQX com o botão *Test* ("connector available"). | ✅ todas as peças responderam sozinhas antes de serem ligadas juntas. |
+| No limite: forçar o sensor | Slider do DHT22 em 1,9 / 4,0 / 4,1 °C (compressor), 5,1 / 4,8 / 4,4 °C (alarme), −19 a 80 °C (extremos); ultrassônico em 11 cm e 5 cm (porta). | ✅ compressor só liga **acima** de 4,0 °C; alarme dispara 30 s depois de passar de 5,0 °C e só normaliza abaixo de 4,5 °C (histerese); porta aberta alarma em 20 s; extremos sem travar. |
+| Na falha: tirar o sensor ou o Wi-Fi | **Rede:** ESP32 bloqueado no broker (Blacklist do EMQX) por ~7 min. **Sensor:** fio de dados do DHT22 removido do diagrama. | ✅ **Rede:** reconexão com espera crescente (2→60 s); alarme local disparou a 6 °C **sem rede**; `buffer` subiu até 5; na volta, `publicado: 6 leituras, 2 eventos`, tudo no D1. ✅ **Sensor:** `sensor=FALHA`, compressor forçado ligado (estado seguro), LED vermelho piscando, alerta `falha_sensor` no painel e leitura gravada com `temp_c = NULL`. |
+| No reinício: tirar e ligar o USB | Limite trocado para 4,5 °C pelo painel e simulação reiniciada. | ✅ compressor ligado desde o boot (estado seguro); Wi-Fi, MQTT e painel voltam sozinhos. ⚠️ o limite voltou a 4,0 °C porque o **Wokwi apaga a flash (NVS)** a cada reinício; numa placa real ele seria mantido. O teste revelou um defeito no painel (formulário mostrava 4,5 enquanto o ESP32 usava 4,0), que foi corrigido. |
+| No ataque: comando falso | Pelo MQTTX, com a senha do broker: comando vazio, sem assinatura, com assinatura errada, expirado e repetido (replay). Pelo `curl`: gravar no Worker sem token, com token errado, sem assinatura e com assinatura de chave adivinhada; 6 PINs errados. | ✅ todos recusados (`json_invalido`, `sem_assinatura`, `assinatura_invalida`, `expirado`, `repetido`; 401 no Worker; 429 no 6º PIN). Nenhuma leitura falsa entrou no D1. O comando legítimo foi executado com ack em ~0,5 s. |
+| Na duração: 10 min ligado | Simulação contínua de 22:01 a 22:16 (05/11) com os testes acontecendo; contagem no D1. | ✅ 16 leituras em 15 min, uma por minuto, sem buraco; 28 eventos gravados em ordem; `wifi=1 mqtt=1` o tempo todo. |
+
+Registro detalhado de cada teste (logs, consultas e horários): [`docs/testes_registro.md`](testes_registro.md).
+
+![Queda de rede: ESP32 bloqueado no broker e alarme disparando sem rede](img/falha_rede_alarme_local.png)
+
+![Falha do sensor: estado seguro e alerta no painel](img/falha_sensor_estado_seguro.png)
+
+![Ataque: comando sem assinatura recusado pelo ESP32](img/ataque_mqtt_sem_assinatura.png)
 
 ---
 
@@ -317,10 +347,23 @@ Cada comando tem um `id` único. O painel mostra **"enviado — aguardando confi
 - *"E se alguém publicar no seu tópico?"* Precisa de credencial do broker e, mesmo com ela, sem a assinatura HMAC o ESP32 rejeita o comando.
 - *"E com 1.000 unidades?"* Um tópico por câmara (`<cliente>/<camaraNN>`), credencial e chave HMAC próprias para cada dispositivo, provisionamento de fábrica, atualização remota (OTA) e alertas agregados no painel com wildcard.
 
-**O que falta para virar produto:** sonda de temperatura à prova d'água (DS18B20) no lugar do DHT22; nobreak ou bateria para alarmar a falta de energia; buffer na flash; certificado de cliente por dispositivo; OTA; caixa IP65. Custo estimado do hardware: [PREENCHER] (ESP32 + sensores + relé).
+**O que falta para virar produto:** sonda de temperatura à prova d'água (DS18B20) no lugar do DHT22; nobreak ou bateria para alarmar a falta de energia; buffer na flash; certificado de cliente por dispositivo; OTA; caixa IP65. Custo estimado do hardware (preços de varejo no Brasil, aproximados):
+
+| Item | Preço aprox. |
+|---|---|
+| ESP32 DevKit | R$ 40 |
+| DHT22 (no produto: sonda DS18B20 à prova d'água, ~R$ 15) | R$ 30 |
+| HC-SR04 (no produto: sensor magnético de porta, ~R$ 10) | R$ 10 |
+| Módulo relé 1 canal | R$ 10 |
+| Buzzer, LED RGB, resistores e botão | R$ 7 |
+| Fonte 5 V | R$ 20 |
+| Caixa plástica | R$ 25 |
+| **Total do protótipo** | **~R$ 140** |
+
+Em 1.000 unidades, comprando componentes no atacado e com placa própria, o custo cai bastante. O preço do relé de potência do compressor real (contator) e da instalação não entra nessa conta.
 
 **Checklist de entrega (até 24/11):**
-- [ ] Caderno preenchido (.docx ou PDF) em `docs/` e no Classroom
-- [ ] Código do ESP32 e do Worker no GitHub, sem senhas nem chaves
-- [ ] README curto: o que faz, como montar e como testar
-- [ ] Print ou vídeo curto do sistema funcionando
+- [x] Caderno preenchido (.docx ou PDF) em `docs/` e no Classroom
+- [x] Código do ESP32 e do Worker no GitHub, sem senhas nem chaves
+- [x] README curto: o que faz, como montar e como testar
+- [x] Print ou vídeo curto do sistema funcionando (prints em `docs/img/`, vídeo no Classroom)
